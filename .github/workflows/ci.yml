@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      # SQL Server Developer edition: free, not licensed for production use.
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Ci-only-passw0rd
+        ports: ["1433:1433"]
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: etl
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: warehouse
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U etl -d warehouse"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      MSSQL_HOST: 127.0.0.1
+      MSSQL_PORT: "1433"
+      MSSQL_USER: sa
+      MSSQL_PASSWORD: Ci-only-passw0rd
+      MSSQL_DATABASE: ledger
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: etl
+      PGPASSWORD: ci-only-password
+      PGDATABASE: warehouse
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Lint
+        run: |
+          uv run ruff check
+          uv run ruff format --check
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 60); do
+            uv run python -c "from etl_bench import source; source.connect('master').close()" && exit 0
+            sleep 2
+          done
+          exit 1
+
+      # Every strategy must be wrong (or right) in exactly the documented way.
+      - name: Tests
+        run: uv run pytest -v
+
+      # The same one command as the README, on a smaller source.
+      - name: Benchmark
+        run: uv run etl-bench run --rows 50000 --rounds 3 | tee -a "$GITHUB_STEP_SUMMARY"
